@@ -88,12 +88,12 @@ func validateArmStorageBlobSize(v interface{}, k string) (ws []string, errors []
 func validateArmStorageBlobType(v interface{}, k string) (ws []string, errors []error) {
 	value := strings.ToLower(v.(string))
 	validTypes := map[string]struct{}{
-		"blob": struct{}{},
-		"page": struct{}{},
+		"block": struct{}{},
+		"page":  struct{}{},
 	}
 
 	if _, ok := validTypes[value]; !ok {
-		errors = append(errors, fmt.Errorf("Blob type %q is invalid, must be %q or %q", value, "blob", "page"))
+		errors = append(errors, fmt.Errorf("Blob type %q is invalid, must be %q or %q", value, "block", "page"))
 	}
 	return
 }
@@ -133,7 +133,7 @@ func resourceArmStorageBlobCreate(d *schema.ResourceData, meta interface{}) erro
 		}
 		if media != nil {
 			blockSize := 4 << 20
-			blockList := make([]storage.Block, 10)
+			blockList := []storage.Block{}
 			buffer := make([]byte, blockSize)
 			blockNumber := 0
 			for {
@@ -145,11 +145,18 @@ func resourceArmStorageBlobCreate(d *schema.ResourceData, meta interface{}) erro
 				}
 
 				blockNumber++
-				blockID := base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("%d", blockNumber)))
+				blockID := base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("blobid-%d", blockNumber)))
 				err = blobClient.PutBlock(cont, name, blockID, buffer[:n])
 				if err != nil {
 					return fmt.Errorf("Error creating storage blob on Azure: %s", err)
 				}
+
+				blockList = append(blockList,
+					storage.Block{
+						ID:     blockID,
+						Status: storage.BlockStatusLatest,
+					},
+				)
 			}
 
 			err = blobClient.PutBlockList(cont, name, blockList)
