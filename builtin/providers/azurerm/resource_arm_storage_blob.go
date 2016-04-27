@@ -1,10 +1,15 @@
 package azurerm
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/storage"
 	"github.com/hashicorp/terraform/helper/schema"
 )
 
@@ -42,12 +47,25 @@ func resourceArmStorageBlob() *schema.Resource {
 				ForceNew:     true,
 				ValidateFunc: validateArmStorageBlobType,
 			},
+			"content": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				ForceNew:      true,
+				ConflictsWith: []string{"size", "source"},
+			},
+			"source": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				ForceNew:      true,
+				ConflictsWith: []string{"size", "content"},
+			},
 			"size": &schema.Schema{
-				Type:         schema.TypeInt,
-				Optional:     true,
-				ForceNew:     true,
-				Default:      0,
-				ValidateFunc: validateArmStorageBlobSize,
+				Type:          schema.TypeInt,
+				Optional:      true,
+				ForceNew:      true,
+				Default:       0,
+				ValidateFunc:  validateArmStorageBlobSize,
+				ConflictsWith: []string{"content", "source"},
 			},
 			"url": &schema.Schema{
 				Type:     schema.TypeString,
@@ -94,17 +112,60 @@ func resourceArmStorageBlobCreate(d *schema.ResourceData, meta interface{}) erro
 	name := d.Get("name").(string)
 	blobType := d.Get("type").(string)
 	cont := d.Get("storage_container_name").(string)
+	var media io.Reader = nil
+
+	if v, ok := d.GetOk("source"); ok {
+		err := error(nil)
+		media, err = os.Open(v.(string))
+		if err != nil {
+			return err
+		}
+	} else if v, ok := d.GetOk("content"); ok {
+		media = bytes.NewReader([]byte(v.(string)))
+	}
 
 	log.Printf("[INFO] Creating blob %q in storage account %q", name, storageAccountName)
 	switch strings.ToLower(blobType) {
 	case "block":
 		err = blobClient.CreateBlockBlob(cont, name)
+		if err != nil {
+			return fmt.Errorf("Error creating storage blob on Azure: %s", err)
+		}
+		if media != nil {
+			blockSize := 4 << 20
+			blockList := make([]storage.Block, 10)
+			buffer := make([]byte, blockSize)
+			blockNumber := 0
+			for {
+				n, err := media.Read(buffer)
+				if err == io.EOF {
+					break
+				} else if err != nil {
+					return fmt.Errorf("Error creating storage blob on Azure: %s", err)
+				}
+
+				blockNumber++
+				blockID := base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("%d", blockNumber)))
+				err = blobClient.PutBlock(cont, name, blockID, buffer[:n])
+				if err != nil {
+					return fmt.Errorf("Error creating storage blob on Azure: %s", err)
+				}
+			}
+
+			err = blobClient.PutBlockList(cont, name, blockList)
+			if err != nil {
+				return fmt.Errorf("Error creating storage blob on Azure: %s", err)
+			}
+		}
 	case "page":
 		size := int64(d.Get("size").(int))
 		err = blobClient.PutPageBlob(cont, name, size, map[string]string{})
-	}
-	if err != nil {
-		return fmt.Errorf("Error creating storage blob on Azure: %s", err)
+		if err != nil {
+			return fmt.Errorf("Error creating storage blob on Azure: %s", err)
+		}
+		if media != nil {
+			// do the upload
+		}
 	}
 
 	d.SetId(name)
